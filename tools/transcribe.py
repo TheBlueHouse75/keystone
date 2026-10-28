@@ -7,16 +7,21 @@
 #   "mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'",
 #   "faster-whisper>=1.1; sys_platform != 'darwin' or platform_machine != 'arm64'",
 #   "av<19; sys_platform != 'darwin' or platform_machine != 'arm64'",   # PyAV 19 broke faster-whisper's decode_audio (metadata_errors)
+#   "pywhispercpp==1.5.1; sys_platform != 'darwin' or platform_machine == 'arm64'",   # --backend whispercpp (Metal on Apple silicon; no Intel Mac wheel)
 # ]
 # ///
 """Add the voice of a feedback recording to its feedback.ks, on the clock of the strokes.
 
     uv run tools/transcribe.py <deck>/feedback/<session>/feedback.ks <audio> [--gap 350] [--silence -40] [--lang fr]
-                               [--backend mlx|faster] [--model <model>]
+                               [--backend mlx|faster|whispercpp] [--model <model>]
 
 Whisper runs on this machine and gives the time of each word; the model (large-v3-turbo) is downloaded once.
 Two engines, the same model: mlx-whisper on a Mac with Apple silicon, faster-whisper elsewhere (Windows, Linux, Intel
 Macs: on an NVIDIA GPU when CUDA works, else on the CPU). --backend forces one (faster-whisper also runs on a Mac).
+--backend whispercpp runs whisper.cpp on the ggml models already on this machine (e.g. those of a dictation app):
+--model is a ggml-*.bin file, or a name (large-v3-turbo, large-v3-turbo-q5_0, …) read as ggml-<name>.bin from the
+folder $WHISPER_CPP_MODELS (downloaded there when missing). $WHISPER_BACKEND and $WHISPER_MODEL set --backend and
+--model, so the server's runs use them too.
 The GPU needs the CUDA 12 libraries: the server adds them when it finds nvidia-smi (uv run --with nvidia-cublas-cu12
 --with nvidia-cudnn-cu12 …); without them the CPU is used. Prints {"says", "text", "device"}. Words
 less than --gap ms apart make one phrase, `Say vN(Span(start, end), Word(start, "text"), …);`: each word keeps its
@@ -37,7 +42,7 @@ Raise --silence for a noisy room. Prints {"says", "text"} as JSON.
 """
 import argparse, json, re
 from pathlib import Path
-import platform, sys
+import os, platform, sys
 import numpy as np
 
 p = argparse.ArgumentParser()
@@ -45,11 +50,12 @@ p.add_argument("ks"); p.add_argument("audio")
 p.add_argument("--silence", type=float, default=-40)
 p.add_argument("--gap", type=int, default=350)
 p.add_argument("--lang", default="fr")
-p.add_argument("--backend", choices=["mlx", "faster"], default="mlx" if sys.platform == "darwin" and platform.machine() == "arm64" else "faster")
-p.add_argument("--model")
+p.add_argument("--backend", choices=["mlx", "faster", "whispercpp"],
+               default=os.environ.get("WHISPER_BACKEND") or ("mlx" if sys.platform == "darwin" and platform.machine() == "arm64" else "faster"))
+p.add_argument("--model", default=os.environ.get("WHISPER_MODEL"))
 a = p.parse_args()
 
-# One function for both engines: transcribe(16 kHz mono float32 samples, vocabulary) -> [(start s, end s, word)]
+# One function for every engine: transcribe(16 kHz mono float32 samples, vocabulary) -> [(start s, end s, word)]
 device = "mlx"
 if a.backend == "mlx":
     import mlx_whisper
@@ -59,6 +65,41 @@ if a.backend == "mlx":
         out = mlx_whisper.transcribe(samples, path_or_hf_repo=a.model or "mlx-community/whisper-large-v3-turbo", language=a.lang,
                                      word_timestamps=True, initial_prompt=prompt, condition_on_previous_text=False, verbose=None)
         return [(w["start"], w["end"], w["word"]) for seg in out["segments"] for w in seg.get("words", [])]
+elif a.backend == "whispercpp":
+    import _pywhispercpp as pw
+    from pywhispercpp.model import Model
+    try:
+        from mlx_whisper.audio import load_audio   # the decoder this platform has (mlx: needs ffmpeg, gives an mx.array)
+    except ImportError:
+        from faster_whisper import decode_audio
+        load_audio = lambda f: decode_audio(f, sampling_rate=16000)
+    # Its own word times are wrong after a silence (a whole phrase at one instant): the times of its attention heads
+    # (DTW) are steady, a little late. They need the heads of the model (from its name; other models: the plain times) and no flash attention.
+    name = re.sub(r"^ggml-|(-q\d_\d)?(\.bin)?$", "", Path(a.model or "large-v3-turbo").name)
+    heads = getattr(pw, "WHISPER_AHEADS_" + name.upper().replace("-", "_").replace(".", "_"), pw.WHISPER_AHEADS_NONE)
+    model = Model(a.model or "large-v3-turbo", models_dir=os.environ.get("WHISPER_CPP_MODELS"), redirect_whispercpp_logs_to=None,
+                  context_params={"dtw_token_timestamps": heads != pw.WHISPER_AHEADS_NONE, "dtw_aheads_preset": heads, "flash_attn": False},
+                  language=a.lang, token_timestamps=True, no_context=True, print_progress=False)
+    device = "whispercpp"
+    def transcribe(samples, prompt):
+        model.transcribe(np.asarray(samples, dtype=np.float32), initial_prompt=prompt or "")
+        ctx, words = model._ctx, []   # the tokens are only in the context (no public accessor)
+        def whole(b):   # no character cut in two
+            try: b.decode(); return True
+            except UnicodeDecodeError: return False
+        for i in range(pw.whisper_full_n_segments(ctx)):
+            first = True
+            for j in range(pw.whisper_full_n_tokens(ctx, i)):
+                d = pw.whisper_full_get_token_data(ctx, i, j)
+                if d.id >= pw.whisper_token_eot(ctx): continue   # [_BEG_], [_TT_…]
+                text = pw.whisper_token_to_bytes(ctx, d.id)   # bytes: a token can hold half of "é"
+                t = (d.t_dtw if d.t_dtw >= 0 else d.t1) / 100   # late in the token, not at its start
+                # a new word after a space, at a segment's start, and at each character in languages written without spaces (as mlx-whisper)
+                if first or text.startswith(b" ") or a.lang in ("zh", "ja", "th", "lo", "my", "yue") and whole(words[-1][1]): words.append([t, text])
+                else: words[-1] = [t if re.search(rb"[\w\x80-\xff]", text) else words[-1][0], words[-1][1] + text]   # "," is timed in the next word
+                first = False
+        # a word is somewhere between the end of the word before and its own end: the sound level finds where
+        return [(p[0] if p else 0, w[0], w[1].decode(errors="replace")) for p, w in zip([None] + words, words)]
 else:
     def cuda_libraries():   # the libraries of the nvidia-* wheels, when uv added them: found before CTranslate2 looks for them
         try:

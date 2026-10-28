@@ -21,7 +21,8 @@ https://github.com/user-attachments/assets/6dffc607-1461-4b5a-b317-7f58a48e0627
 - **Slides styled by Claude**: you write a brief (title, text, notes); Claude Code writes the slide from the style library.
 - **Feedback by drawing and talking**: circle, point and speak over the slides; your voice is transcribed on your
   computer, and Claude turns it into tasks you can follow, answer and correct.
-- **Claude auto**: Claude works on its own after each recording, and can say aloud what it did.
+- **Claude auto**: Claude works on its own after each recording, and can say aloud what it did. Codex can take its
+  place, per deck.
 - **Style library**: brand rules, style guides, layouts and components, each with an example slide.
 - **Any language**: a deck written in one language and translated into others, one HTML file per slide.
 - **3D in slides**: three.js figures with studio or outdoor light, ambient occlusion and soft shadows.

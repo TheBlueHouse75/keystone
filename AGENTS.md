@@ -24,6 +24,7 @@ Optional, for some features:
 | Tool | For |
 |---|---|
 | [Claude Code](https://claude.com/claude-code) (`claude` on the `PATH`, signed in) | Styling slides, handling feedback, "Claude auto" |
+| [Codex CLI](https://github.com/openai/codex) (`codex` on the `PATH`, signed in) | "Claude auto" run by Codex instead (see "Claude with no terminal") |
 | Google Chrome, Chromium or Microsoft Edge | Screenshots, WebP encoding, thumbnails of published talks (found by itself; `CHROME=<path>` to choose one) |
 | [uv](https://docs.astral.sh/uv/) | Transcription of feedback recordings (Whisper `large-v3-turbo`, on your machine; the model downloads on first use) |
 | `npx` (comes with Node) | `tools/meshopt.mjs` downloads gltfpack when it runs |
@@ -320,6 +321,12 @@ makes Claude read the slide on screen, so it is ready when the first part arrive
 only read-only commands, `node tools/ks.mjs`, `node tools/asset.mjs`, `npm run shots` and `node tools/cdp-check.mjs`
 (no user is there to approve anything else). `claude.json` holds the session id (open it in a terminal with `claude --resume <id>`) and
 Claude's last sentence, shown in the panel.
+Codex instead of Claude: `"agent": "codex"` in the deck's `feedback/claude.json` (`codex` on the `PATH`, signed in).
+The server then runs `codex exec --json` in the deck folder, with the same prompt, steps and review: both passes use
+the model of your Codex config, the fast one with reasoning `medium`, the strong one `high`. Its sandbox lets it write
+in the deck folder (and the temporary folder) only, with the network open so that `npm run shots` reaches the
+server. A run within 60 min of the last one resumes its session (`codex exec resume`; Codex compacts a long session
+by itself); `claude.json` holds that session id (`codex resume <id>` in a terminal).
 The presenter shows what happens now in its bottom left corner, with Clawd playing the stage: `listening` (the user
 records), `transcribing` (the save), then Claude's run: `reading`, `looking` (a picture), `tasks` (it edits the session
 file), `working` (it edits a slide), `checking` (screenshots), and `done`, `ask` (a `State::Ask` task) or `error` at the

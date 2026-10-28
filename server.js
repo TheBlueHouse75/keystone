@@ -340,6 +340,7 @@ async function serveDeck(DECK_DIR, port) {
   // user follows the Task lines in the panel. The first run starts a Claude session, the next ones resume it
   // (--resume), so Claude remembers what it just did; after CLAUDE_TTL with no run a new session starts.
   // No user answers its permission prompts: it may edit files and run only the commands listed below.
+  // "agent": "codex" in claude.json runs Codex instead (codexExec), for users of either tool.
   const CLAUDE_FILE = path.join(FEEDBACK, "claude.json");
   const CLAUDE_TOOLS = ["Bash(node tools/ks.mjs:*)", "Bash(node tools/asset.mjs:*)", "Bash(npm run shots:*)", "Bash(node tools/cdp-check.mjs:*)"];
   const claudeTools = async () => [...CLAUDE_TOOLS, ...(await deckLangs(await readJSON(DECK, {}))).languages.slice(1)   // and in each other language of the deck
@@ -475,7 +476,9 @@ async function serveDeck(DECK_DIR, port) {
   // back to. The strong one takes what the fast one leaves to do: 3D work, and a task the user came back to twice or
   // more (the fast one did not get it right). Measured on a day of use with a wider rule: the strong one took 93 %
   // of the time, on tasks that were not 3D.
-  const FAST = { model: "sonnet", effort: "medium" }, STRONG = { model: "opus" };
+  // With Codex ("agent": "codex" in claude.json) both levels use the model of the user's Codex config (its names
+  // change often), with less or more reasoning.
+  const FAST = { model: "sonnet", effort: "medium", codex: "medium" }, STRONG = { model: "opus", codex: "high" };
   const rel = f => path.relative(ROOT, f) || ".";
 
   // One run of Claude Code, read as a stream of events (one JSON per line); the last event holds its answer.
@@ -484,7 +487,8 @@ async function serveDeck(DECK_DIR, port) {
   // the earlier work. Each step is pushed to the pages, unless quiet. Stopped after 20 min.
   async function claudeExec(level, prompt, quiet = false) {
     const st = await readJSON(CLAUDE_FILE, {});
-    const resume = st.session && Date.now() - st.at < CLAUDE_TTL && st.ctx < CLAUDE_CTX, session = resume ? st.session : crypto.randomUUID();
+    if (st.agent === "codex") return codexExec(level, prompt, quiet, st);
+    const resume = st.session && (st.sessionAgent || "claude") === "claude" && Date.now() - st.at < CLAUDE_TTL && st.ctx < CLAUDE_CTX, session = resume ? st.session : crypto.randomUUID();
     let ctx = 0;   // tokens the session holds: what the last request sent
     const tools = await claudeTools();
     const run = flag => new Promise((done, fail) => {
@@ -523,12 +527,74 @@ async function serveDeck(DECK_DIR, port) {
     // A session that can no longer be resumed: start a new one
     const gone = err => /No conversation found/.test(err.message) ? run("--session-id") : Promise.reject(err);
     try { return await (resume ? run("--resume").catch(gone) : run("--session-id")); }
-    finally { await saveClaude({ session, at: Date.now(), ctx }); }
+    finally { await saveClaude({ session, sessionAgent: "claude", at: Date.now(), ctx }); }
+  }
+
+  // The same run with Codex (codex exec --json), its events turned into Claude's so the panel shows the same steps.
+  // It works in the deck folder, the only place its sandbox lets it write (and the temporary folder); the network
+  // is open because the screenshots load the deck from this server. Codex compacts a long session by itself: only
+  // CLAUDE_TTL starts a new one. Codex picks the session id: it comes with the first event. Its connectors (MCP) stay:
+  // no option turns them all off.
+  async function codexExec(level, prompt, quiet, st) {
+    const resume = st.session && st.sessionAgent === "codex" && Date.now() - st.at < CLAUDE_TTL;
+    let session = resume ? st.session : "";
+    const run = again => new Promise((done, fail) => {
+      const codex = tool("codex"), before = new Map();   // file → its text before Codex changes it
+      const child = spawn(codex.file, codex.args(["exec", ...(again ? ["resume", session] : []), "--json", "--skip-git-repo-check",
+        "-c", 'sandbox_mode="workspace-write"', "-c", "sandbox_workspace_write.network_access=true", "-c", 'approval_policy="never"',
+        "-c", `model_reasoning_effort="${level.codex}"`, "-"]),
+        { cwd: DECK_DIR, env: { ...TOOL_ENV, PORT: String(port) }, stdio: ["pipe", "pipe", "pipe"], shell: codex.shell, windowsHide: true });
+      child.stdin.on("error", () => {});
+      child.stdin.end(prompt);
+      const timer = setTimeout(() => child.kill(), 20 * 60e3);
+      claudeChild = child;
+      let buffer = "", errors = "", answer = null, failed = "";
+      const note = ev => {
+        const step = !quiet && claudeStepOf(ev);
+        if (step) { claudeStep = step[0]; claudeStage = step[1] || claudeStage; }
+        if (!quiet && claudeNote(ev)) pushClaude();
+      };
+      child.stdout.on("data", chunk => {
+        buffer += chunk;
+        for (let i; (i = buffer.indexOf("\n")) >= 0; buffer = buffer.slice(i + 1)) {
+          let ev; try { ev = JSON.parse(buffer.slice(0, i)); } catch { continue; }
+          if (ev.type === "thread.started") session = ev.thread_id;
+          if (ev.type === "turn.failed") failed = ev.error?.message || "Codex failed";
+          if (ev.type === "error") errors = String(ev.message).slice(-600);   // may be a retry: only turn.failed ends the run
+          const item = ev.item || {}, tool_use = (name, input) => note({ type: "assistant", message: { content: [{ type: "tool_use", name, input }] } });
+          if (ev.type === "item.completed" && item.type === "agent_message") { answer = item.text; note({ type: "assistant", message: { content: [{ type: "text", text: item.text }] } }); }
+          if (ev.type === "item.started" && item.type === "command_execution") {
+            const command = String(item.command).replace(/^\S+ -lc '([\s\S]*)'$/, "$1"), on = command.match(/slides\/([a-z0-9-]+)\//)?.[1];
+            if (!quiet && on && existsSync(path.join(SLIDES, on))) claudeSlide = on;
+            tool_use("Bash", { command });
+          }
+          // A change: Claude's Edit with nothing in it marks the file (its slide, the review, the step); the lines
+          // it adds and removes are counted once it is done
+          if (item.type === "file_change") for (const { path: file } of item.changes || []) {
+            if (ev.type === "item.started") { before.set(file, existsSync(file) ? readFileSync(file, "utf8") : ""); tool_use("Edit", { file_path: file, old_string: "", new_string: "" }); }
+            if (ev.type === "item.completed" && !quiet && !file.startsWith(FEEDBACK + path.sep)) {
+              let now = ""; try { now = readFileSync(file, "utf8"); } catch {}
+              const [add, del] = lineDiff(before.get(file) ?? "", now), sum = claudeDiff.get(file) || [0, 0];
+              claudeDiff.set(file, [sum[0] + add, sum[1] + del]);
+            }
+          }
+        }
+      });
+      child.stderr.on("data", chunk => errors = (errors + chunk).slice(-600));
+      child.on("error", fail);
+      child.on("close", code => {
+        clearTimeout(timer); claudeChild = null;
+        !code && answer !== null && !failed ? done(String(answer)) : fail(new Error(failed || errors.trim() || "Codex stopped with no answer"));
+      });
+    });
+    const gone = err => /no rollout found/.test(err.message) ? (session = "", run(false)) : Promise.reject(err);   // a session that can no longer be resumed: a new one
+    try { return await (resume ? run(true).catch(gone) : run(false)); }
+    finally { if (session) await saveClaude({ session, sessionAgent: "codex", at: Date.now() }); }
   }
 
   // Everything Claude needs is in the prompt (the session files, their pictures, the slides): each thing it has to
   // look for is one more step, and a step takes 1 to 2 s.
-  let claudeStyle = "";   // set before each run: the deck's style guide, when deck.json names one
+  let claudeStyle = "", claudeAgent = "claude";   // set before each run: the deck's style guide, when deck.json names one; who runs
   const claudePrompt = (level, why, pending) => `${why}
 Deck "${DECK_NAME}": folder ${rel(DECK_DIR)}, served on port ${port} (PORT is set: "npm run shots -- <id>" shoots this deck)${claudeStyle}.
 This is all the feedback you have to handle now. Do not list or search the feedback folder.
@@ -545,7 +611,8 @@ Two kinds of task are not for you. Leave them in State::Todo and do not start th
 3. One command: node tools/ks.mjs <the session files>. Take no screenshot for a task you do for the first time. For a task the user came back to, the user saw something wrong: after your change, run npm run shots -- <slide id>, look at the picture, and fix what is wrong before you go on. Checking every change with a picture is slow, so the user looks at the slide and comes back to you when something is not right.
 4. Set the tasks you did to State::Done. No check after that: the presenter reports a session file that is wrong.
 No user reads this conversation, the user only sees the Task lines in the presenter. Never ask a question here: write a State::Ask task. Do not commit, do not push, do not start or stop a server.
-Change files with the Read and Edit tools only. Never write a file with a shell command (printf, echo, cat >) and do not start a command with cd: no user can approve it, it is refused and costs a step. Only read-only commands, "node tools/ks.mjs", "node tools/asset.mjs", "npm run shots" and "node tools/cdp-check.mjs" run, from the Keystone root.
+${claudeAgent === "codex" ? `You work in the deck folder, the only place you can write. AGENTS.md is ${path.join(ROOT, "AGENTS.md")}, and the paths above are relative to the Keystone root, ${ROOT}. Change files with apply_patch. Run "node tools/ks.mjs", "node tools/asset.mjs", "npm run shots" and "node tools/cdp-check.mjs" with the Keystone root as working directory.`
+  : `Change files with the Read and Edit tools only. Never write a file with a shell command (printf, echo, cat >) and do not start a command with cd: no user can approve it, it is refused and costs a step. Only read-only commands, "node tools/ks.mjs", "node tools/asset.mjs", "npm run shots" and "node tools/cdp-check.mjs" run, from the Keystone root.`}
 An image, a video or a model of another deck or of the style library (you can read every deck's files): copy it into this deck with "node tools/asset.mjs <file> [<file> …] ${rel(DECK_DIR)}", which prints the /deck/assets/… address to write in the slide. Never point a slide at another deck's folder or server, and never ask the user to copy a file.
 End with one or two short sentences in ${langName(USER_LANG)} that say what you did. The presenter shows them and can read them aloud to the user: speak to the user${USER_LANG === "fr" ? ' ("tu")' : ""}, plain words, no code, no file name, no backticks. Say what changed on the slides, nothing about how you worked: never say that you took no screenshot or did not look at the result, in these sentences or in a task's text.`;
 
@@ -591,8 +658,10 @@ End with one or two short sentences in ${langName(USER_LANG)} that say what you 
         const guide = (await readJSON(DECK, {})).style;
         claudeStyle = guide ? `. Its style guide is "${guide}": follow ${rel(path.join(STYLES, String(guide), "style.md"))}` : "";
         if (!claudeRunning) { claudeRunning = Date.now(); claudeLog = []; claudeDiff = new Map(); }
-        claudeModel = level.model; claudeStep = level === FAST ? "Reading the feedback" : "Taking the 3D work"; claudeStage = "reading";
-        claudeLogged("pass", level === FAST ? "Sonnet: reads the feedback, writes the tasks and does them" : "Opus: takes what Sonnet left (3D, or a task you came back to twice)");
+        claudeAgent = (await readJSON(CLAUDE_FILE, {})).agent === "codex" ? "codex" : "claude";
+        claudeModel = claudeAgent === "codex" ? "codex" : level.model; claudeStep = level === FAST ? "Reading the feedback" : "Taking the 3D work"; claudeStage = "reading";
+        claudeLogged("pass", claudeAgent === "codex" ? (level === FAST ? "Codex (reasoning medium): reads the feedback, writes the tasks and does them" : "Codex (reasoning high): takes what the fast pass left (3D, or a task you came back to twice)")
+          : level === FAST ? "Sonnet: reads the feedback, writes the tasks and does them" : "Opus: takes what Sonnet left (3D, or a task you came back to twice)");
         await pushClaude();
         try { last = { ok: true, at: Date.now(), text: (await claudeExec(level, claudePrompt(level, why, pending))).trim().slice(-600) }; }   // the strong pass's sentence replaces the fast one's
         catch (err) { last = { ok: false, at: Date.now(), text: String(err.message).trim().slice(-600) }; if (!claudeStopping) console.error("claude:", last.text); break; }

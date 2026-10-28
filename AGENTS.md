@@ -46,6 +46,9 @@ Server settings, as environment variables:
 | `PORT` | `4321` | Port of a single deck (`node server.js <deck folder>`) |
 | `HOST` | `127.0.0.1` | Listen on another address, e.g. a Tailscale address to open the presenter on a phone or a tablet |
 | `DECK` | — | Deck folder to serve, same as the argument |
+| `WHISPER_BACKEND` | `mlx` on Apple silicon, else `faster` | Transcription engine: `mlx`, `faster` or `whispercpp` ([whisper.cpp](https://github.com/ggml-org/whisper.cpp), Metal on Apple silicon) |
+| `WHISPER_MODEL` | `large-v3-turbo` | The engine's model; `whispercpp`: a `ggml-*.bin` file, or a name read as `ggml-<name>.bin` from `WHISPER_CPP_MODELS` |
+| `WHISPER_CPP_MODELS` | pywhispercpp's folder | Folder of whisper.cpp models, e.g. those a dictation app already installed: used where they are, never copied (a missing one downloads there) |
 
 ### Keys of the presenter
 
@@ -353,7 +356,8 @@ run: the models and the effort of the two levels are `FAST` and `STRONG` in `ser
 
 How it works: `POST /api/feedback {events, audio}` writes the session and runs `uv run tools/transcribe.py` (in the user's language, `userLang`)
 (`large-v3-turbo` on this computer: mlx-whisper on a Mac with Apple silicon, faster-whisper elsewhere, on an NVIDIA GPU
-when `nvidia-smi` is found (the server adds the CUDA libraries to uv), else on the CPU; the brief of the slide on screen is its vocabulary; the sound level
+when `nvidia-smi` is found (the server adds the CUDA libraries to uv), else on the CPU; or whisper.cpp on ggml models
+already on disk, `WHISPER_BACKEND=whispercpp`, with word times from its attention heads (DTW), within 50 ms of mlx's; the brief of the slide on screen is its vocabulary; the sound level
 drops words invented over silence and puts each word where its sound is). `/render/<id>?feedback=<session>&visit=<n>`
 draws a visit's strokes over the slide (the pictures come from it, through headless Chrome).
 

@@ -2,7 +2,7 @@
 
 The brand of the decks: tone, colours, shapes, type, logos. Edit it (and `brand.json`) for your own brand; a file of
 `decks/public/` replaces the same file of `public/` (your logos, tokens), so your decks can carry your brand while the
-tool keeps the neutral one.
+tool keeps the neutral one; a file of `<deck>/public/` does the same for that deck only (one brand per deck).
 
 ## Tone
 

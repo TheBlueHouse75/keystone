@@ -66,8 +66,8 @@ Server settings, as environment variables:
 Touch screens (phone, tablet): swipe left or right, or tap the left or right edge of the slide, to change slide; a tap
 shows the bar, which keeps the presenting buttons only. Full screen: the browser's on iPad; on iPhone (no full screen
 for pages), Share › Add to Home Screen: the deck then opens as a full-screen web app with its name and icon
-(`/manifest.webmanifest`, `/icon.png` = `<deck>/assets/icon.png` 512×512, else `assets/brand/icon.png` of `decks/public/`
-then `public/`). On a phone (touch and a short side under 600 px, or `?phone` in the address) each slide is rendered
+(`/manifest.webmanifest`, `/icon.png` = `<deck>/assets/icon.png` 512×512, else `assets/brand/icon.png` of the deck's
+`public/`, `decks/public/`, then `public/`). On a phone (touch and a short side under 600 px, or `?phone` in the address) each slide is rendered
 with `<html class="sa-phone">` (`/render/<id>?phone`): a deck's CSS can make its text bigger there, since the slide shows at about half size.
 
 Pages reload by themselves when a file of the deck or of `public/` changes. The presenter keeps only the slides near
@@ -83,6 +83,8 @@ Your own decks: `decks/` (not in the Keystone repo: `.gitignore`; often a git re
   `keystone.json`. "+ New deck" adds to it.
 - `decks/public/` — a file here replaces the same file of `public/`, in the server and in published talks: your logos
   (`decks/public/assets/brand/`, same file names), the reader's `site.json`, your tokens. The tool keeps neutral ones.
+- `<deck>/public/` — the same for one deck: its own brand, before `decks/public/` and `public/`. Decks of different
+  brands are then served side by side and published to one site (see "Publishing").
 
 Run: `node server.js` (`npm start`) serves every deck of `keystone.json` (`examples/keystone` 4320, the guide to Keystone; `library` 4321; `examples/hello` 4322) and of
 `decks/keystone.json`, each on its own port. `node server.js <deck folder>` (or `DECK=<deck folder>`,
@@ -109,9 +111,11 @@ deck keeps every deck URL (`/deck/`, `/slides/`, `/api/`) unchanged. `GET /api/d
 Publishing (website or standalone): `node tools/deploy.mjs <deck folder> --out <folder> [--url <site address>]` writes the deck
 read-only in the website's talk format: `talks/<slug>/` (talk.json, the reader page, slides, thumbnails, cover, og.jpg),
 `talks/_shared/` (theme, components, brand, reader), `talks/index.json` (every talk deployed there), `assets/fonts/`,
-`css/tokens.css`. Settings: the `publish` block of `deck.json` (see the script's header; `examples/hello` has one).
+`css/tokens.css`. A deck with its own `public/` (its brand) puts what it uses of `public/`, its fonts and tokens
+included, in `talks/<slug>/_shared/` instead, so it never changes the other talks of the site; the price: those files
+are not shared with other talks (one copy per talk). Settings: the `publish` block of `deck.json` (see the script's header; `examples/hello` has one).
 Website: `--out <the site's public folder>`; the site's name, address and links: `public/reader/site.json`
-(`name`, `url`, `railPrefix`, `home`, `index`, `contact`, `work`, `follow`; yours in `decks/public/reader/site.json`). Standalone: any empty folder, served at its root by any static server.
+(`name`, `url`, `railPrefix`, `home`, `index`, `contact`, `work`, `follow`; yours in `decks/public/reader/site.json`, or the deck's `public/reader/site.json`). Standalone: any empty folder, served at its root by any static server.
 Only published files leave the deck: no briefs, notes, checks or prompts; deck files only when a slide references them;
 unstyled slides are skipped. `deck:` links become links to that talk (`/talks/<slug>/#n`) when the target deck is
 published and listed; to a deck with no `publish` block or with `"publish": { "listed": false }` they are removed (the
@@ -145,6 +149,7 @@ Tool (URL `/public/…`):
 
 Deck folder (URL `/deck/…` for its files, `/slides/<id>/…` for slide folders):
 - `deck.json` — deck title (`title`, in the deck's language; `titles: { "<lang>": … }` in the others), language (`lang`: the language `slide.html` is written in, `en` by default), style guide (`style`, optional), slide order (`order`, array of slide ids), optional `publish` settings.
+- `public/` — optional, the deck's brand: a file here replaces the same file of `public/` (`/public/…`), before `decks/public/`: tokens, fonts, logos, the reader's `site.json`.
 - `slides/<id>/brief.json` — what the user wrote in the editor: `title`, `text`, `notes`, `status` (`todo` | `done`).
 - `slides/<id>/slide.html` — the styled slide (an HTML fragment, 1280×720). Missing = the brief is shown as a draft.
 - `slides/<id>/reference.png` — optional original slide (e.g. Keynote), for comparison.

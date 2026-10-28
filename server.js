@@ -21,7 +21,7 @@ import { launchChrome } from "./tools/chrome.mjs";
 //   node server.js                 every deck of keystone.json, each on its own port: { "decks": [{ "dir", "port" }] }
 // decks/ is your own space, outside the Keystone repo (.gitignore): your decks, listed in decks/keystone.json (same format,
 // dirs relative to decks/, added to those of keystone.json), and decks/public/, whose files replace those of public/
-// (your logos, the reader's site.json…).
+// (your logos, the reader's site.json…). A deck's own public/ (<deck>/public/) comes first: its brand, for that deck only.
 // A deck's URLs are the same whatever its port: one port per deck keeps /deck/, /slides/ and /api/ unchanged.
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, "public");
@@ -236,6 +236,9 @@ async function serveDeck(DECK_DIR, port) {
   const DECK_NAME = path.basename(DECK_DIR);
   const SLIDES = path.join(DECK_DIR, "slides");
   const DECK = path.join(DECK_DIR, "deck.json");
+  // /public/<file>: the deck's own brand (<deck>/public/), else decks/public/, else the tool's
+  const LAYERS = [path.join(DECK_DIR, "public"), OVERLAY, PUBLIC];
+  const layer = rel => LAYERS.find(d => existsSync(path.join(d, rel))) || PUBLIC;
   // Optional deck routes: <deck>/server.mjs exports `routes` = { "POST /api/…": async ({ req, res, url, body, json, deckDir }) => … }
   const DECK_ROUTES = existsSync(path.join(DECK_DIR, "server.mjs"))
     ? (await import(pathToFileURL(path.join(DECK_DIR, "server.mjs")))).routes || {} : {};
@@ -683,12 +686,12 @@ Get ready: read ${rel(path.join(SLIDES, slide, "slide.html"))} now. Change no fi
     try {
       if (p === "/" || p === "/index.html") return serveFile(req, res, path.join(PUBLIC, "index.html"), PUBLIC);
       if (p.startsWith("/public/")) {
-        const own = path.join(OVERLAY, p.slice(8));
-        return existsSync(own) ? serveFile(req, res, own, OVERLAY) : serveFile(req, res, path.join(PUBLIC, p.slice(8)), PUBLIC);
+        const dir = layer(p.slice(8));
+        return serveFile(req, res, path.join(dir, p.slice(8)), dir);
       }
       if (p.startsWith("/deck/")) return serveFile(req, res, path.join(DECK_DIR, p.slice(6)), DECK_DIR);
       // Web app (Add to Home Screen, install): the deck's name, full screen, landscape; its icon is <deck>/assets/icon.png
-      // (512×512), else the brand's (decks/public/assets/brand/icon.png, then public/'s)
+      // (512×512), else the brand's (/public/assets/brand/icon.png)
       if (p === "/manifest.webmanifest") {
         const d = await readJSON(DECK, {}), name = titleIn(d, viewLang(url)) || DECK_NAME;
         res.writeHead(200, { "content-type": "application/manifest+json; charset=utf-8", "cache-control": "no-cache" });
@@ -696,9 +699,8 @@ Get ready: read ${rel(path.join(SLIDES, slide, "slide.html"))} now. Change no fi
           background_color: "#000000", theme_color: "#000000", icons: [{ src: "/icon.png", sizes: "512x512", type: "image/png", purpose: "any" }] }));
       }
       if (p === "/icon.png") {
-        const own = path.join(DECK_DIR, "assets", "icon.png"), brand = path.join(OVERLAY, "assets", "brand", "icon.png");
-        return existsSync(own) ? serveFile(req, res, own, DECK_DIR) : existsSync(brand) ? serveFile(req, res, brand, OVERLAY)
-          : serveFile(req, res, path.join(PUBLIC, "assets", "brand", "icon.png"), PUBLIC);
+        const own = path.join(DECK_DIR, "assets", "icon.png"), brand = layer("assets/brand/icon.png");
+        return existsSync(own) ? serveFile(req, res, own, DECK_DIR) : serveFile(req, res, path.join(brand, "assets", "brand", "icon.png"), brand);
       }
 
       if (p === "/api/events") {

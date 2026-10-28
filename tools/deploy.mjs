@@ -11,7 +11,8 @@
 //     "listed": false (optional: published, but kept out of talks/index.json and of links from other talks) }
 //
 // The site's address (for og: tags) is --url, else "url" in public/reader/site.json, whose "name" is the site name in the
-// page title. A file of decks/public/ replaces the same file of public/ (your brand, your site.json), as in the server.
+// page title. A file of decks/public/ replaces the same file of public/ (your brand, your site.json), as in the server;
+// a file of the deck's own public/ (<deck>/public/: that deck's brand) replaces both.
 //
 // Links between decks (<a href="deck:<id>#<n>">, decks listed in keystone.json or decks/keystone.json) become links to that talk on the site
 // when the deck is published and listed; otherwise the link is removed (its text stays). Deploy the target deck too.
@@ -22,6 +23,8 @@
 //   talks/_shared/       the Keystone files the slides use (theme, components, three.js, brand images) and the reader
 //   talks/index.json     every talk deployed to this folder (the host's talk list reads it)
 //   assets/fonts/, css/tokens.css   Keystone's fonts and tokens (the website's own pages use them too)
+// A deck with its own public/ keeps its brand out of the shared folders, so talks of other brands are not changed:
+// what it uses of the tool, its fonts and tokens included, goes to talks/<slug>/_shared/ instead.
 //
 // Only published files leave the deck: slides are rendered from slide.html (+ slide.<lang>.json translations), editor files
 // (brief.json, checks.json, prompt.done.txt, reference.png) are never copied, and deck files are copied only when
@@ -37,7 +40,7 @@ import { launchChrome, encodeWebp } from "./chrome.mjs";
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PUBLIC = path.join(ROOT, "public");
 const OVERLAY = path.join(ROOT, "decks", "public");
-const publicFile = rel => [path.join(OVERLAY, rel), path.join(PUBLIC, rel)].find(f => fs.existsSync(f)) || path.join(PUBLIC, rel);
+const publicFile = rel => [path.join(OWN, rel), path.join(OVERLAY, rel), path.join(PUBLIC, rel)].find(f => fs.existsSync(f)) || path.join(PUBLIC, rel);
 const READER = path.join(PUBLIC, "reader");
 
 const args = process.argv.slice(2);
@@ -47,6 +50,7 @@ const OUT = OUT_ARG && path.resolve(OUT_ARG);
 const URL_ARG = opt("--url");
 const DECK_DIR = args[0] && path.resolve(args[0]);
 if (!DECK_DIR || !OUT) { console.error("Usage: node tools/deploy.mjs <deck folder> --out <folder> [--url <site address>]"); process.exit(1); }
+const OWN = path.join(DECK_DIR, "public");   // the deck's own brand, if any
 
 const deck = JSON.parse(fs.readFileSync(path.join(DECK_DIR, "deck.json"), "utf8"));
 const readJSON = file => { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; } };
@@ -60,7 +64,9 @@ const LANGS = pub.languages || [pub.sourceLang || deck.lang || "en"];
 const SOURCE_LANG = pub.sourceLang || deck.lang || "en";
 const TALKS = path.join(OUT, "talks");
 const TALK = path.join(TALKS, SLUG);
-const SHARED = path.join(TALKS, "_shared");
+const BRANDED = fs.existsSync(OWN);
+const SHARED = BRANDED ? path.join(TALK, "_shared") : path.join(TALKS, "_shared");
+const SHARED_URL = BRANDED ? `/talks/${SLUG}/_shared/` : "/talks/_shared/";
 const FONTS = path.join(OUT, "assets", "fonts");
 const TOKENS = path.join(OUT, "css", "tokens.css");
 
@@ -71,10 +77,10 @@ const REF = /\/(?:public|deck)\/[A-Za-z0-9_./-]*[A-Za-z0-9_/-]/g;   // absolute 
 
 // Point Keystone's absolute paths at the published folders; images become WebP (web addresses and Ultra HDR stay as they are).
 function rewrite(text) {
-  return text
+  return (BRANDED ? text : text
     .replace(/(?<=["'(])\/public\/fonts\//g, "/assets/fonts/")
-    .replace(/(?<=["'(])\/public\/tokens\.css/g, "/css/tokens.css")
-    .replace(/(?<=["'(])\/public\//g, "/talks/_shared/")
+    .replace(/(?<=["'(])\/public\/tokens\.css/g, "/css/tokens.css"))
+    .replace(/(?<=["'(])\/public\//g, SHARED_URL)
     .replace(/(?<=["'(])\/deck\//g, `/talks/${SLUG}/`)
     .replace(/(?<=["'(])\/slides\//g, `/talks/${SLUG}/slides/`)
     .replace(/([^"'()\s`]*)\.(?:png|jpe?g)\b/g, (m, stem) => stem.includes("//") || stem.endsWith(".uhdr") ? m : `${stem}.webp`);
@@ -102,8 +108,8 @@ function deckLinks(fragment, id) {
 function page(id, fragment, lang) {
   const m = fragment.match(/^\s*<!--\s*body:\s*([\w\s-]+?)\s*-->/);
   return `<!doctype html><html lang="${lang}"><head><meta charset="utf-8">\n<base href="/talks/${SLUG}/slides/${id}/">\n` +
-    `<meta name="viewport" content="width=1280">\n<link rel="stylesheet" href="/talks/_shared/theme.css">\n` +
-    `<script src="/talks/_shared/components/display.js"></script>\n` +
+    `<meta name="viewport" content="width=1280">\n<link rel="stylesheet" href="${SHARED_URL}theme.css">\n` +
+    `<script src="${SHARED_URL}components/display.js"></script>\n` +
     `</head><body class="sa-slide${m ? " " + m[1] : ""}">${rewrite(fragment)}</body></html>\n`;
 }
 
@@ -163,7 +169,7 @@ async function exportTalk(encoder) {
   // The reader: every file of public/reader/ but its page template, which becomes the talk's index.html below.
   const template = fs.readFileSync(publicFile("reader/talk.html"), "utf8");
   for (const r of template.match(REF) || []) refs.add(r);
-  const own = path.join(OVERLAY, "reader"), files = [...fs.readdirSync(READER), ...(fs.existsSync(own) ? fs.readdirSync(own) : [])];
+  const files = [READER, path.join(OVERLAY, "reader"), path.join(OWN, "reader")].flatMap(d => fs.existsSync(d) ? fs.readdirSync(d) : []);
   for (const f of new Set(files)) if (f !== "talk.html") refs.add(`/public/reader/${f}`);
 
   // Copy what the slides use, following references inside copied css/js until nothing new appears.
@@ -174,7 +180,7 @@ async function exportTalk(encoder) {
     let src, dst;
     if (kind === "public") {
       src = publicFile(rel);
-      dst = rel.startsWith("fonts/") ? path.join(FONTS, rel.slice(6)) : rel === "tokens.css" ? TOKENS : path.join(SHARED, rel);
+      dst = BRANDED ? path.join(SHARED, rel) : rel.startsWith("fonts/") ? path.join(FONTS, rel.slice(6)) : rel === "tokens.css" ? TOKENS : path.join(SHARED, rel);
     } else {
       src = path.join(DECK_DIR, rel);
       dst = path.join(TALK, rel);
